@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Nail Try-On</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:#000;overflow:hidden;width:100vw;height:100vh;}
+  #wrap{position:relative;width:100vw;height:100vh;}
+  video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;}
+  canvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+  #status{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,0.6);padding:8px 20px;border-radius:20px;font-family:Arial,sans-serif;font-size:13px;white-space:nowrap;z-index:10;}
+  #loading{position:absolute;inset:0;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:20;color:#fff;gap:16px;font-family:Arial,sans-serif;text-align:center;padding:20px;}
+  .sp{width:44px;height:44px;border:3px solid rgba(255,255,255,0.15);border-top-color:#FF4FA3;border-radius:50%;animation:spin .85s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="sp"></div>
+  <h3 style="font-weight:500;font-size:16px">Loading Hand Tracking...</h3>
+  <p style="font-size:13px;opacity:0.6">Allow camera access when prompted</p>
+</div>
+<div id="wrap">
+  <video id="vid" autoplay playsinline muted></video>
+  <canvas id="cvs"></canvas>
+  <div id="status">Show your open hand to the camera</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.1/dist/hand-pose-detection.min.js"></script>
+<script>
+const vid=document.getElementById('vid');
+const cvs=document.getElementById('cvs');
+const ctx=cvs.getContext('2d');
+const st=document.getElementById('status');
+const ld=document.getElementById('loading');
+
+const CR=255,CG=55,CB=155,CA=0.85;
+const FINGERS=[[4,3,2,true],[8,7,6,false],[12,11,10,false],[16,15,14,false],[20,19,18,false]];
+
+let detector=null, mirror=false, scaleX=1, scaleY=1;
+
+async function init(){
+  try{
+    await tf.ready();
+    detector=await handPoseDetection.createDetector(
+      handPoseDetection.SupportedModels.MediaPipeHands,
+      {runtime:'tfjs',modelType:'lite',maxHands:2}
+    );
+    await startCam();
+    ld.style.display='none';
+    loop();
+  }catch(e){
+    ld.innerHTML=`<p style="color:#FF4FA3;padding:20px">Error: ${e.message}<br>Please allow camera and refresh.</p>`;
+  }
+}
+
+async function startCam(){
+  let stream;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{exact:'environment'},width:{ideal:1280},height:{ideal:720}}});
+    mirror=false;
+  }catch(e){
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}});
+    mirror=true;
+  }
+  vid.srcObject=stream;
+  return new Promise(r=>{vid.onloadedmetadata=()=>{vid.play();r();};});
+}
+
+function getCoords(kp){
+  // keypoints can be in pixel space (0..videoWidth) or normalized (0..1)
+  // detect which by checking if values are >2
+  const x=kp.x, y=kp.y;
+  if(x<=1.5 && y<=1.5){
+    // normalized — scale to canvas
+    return{x:x*cvs.width, y:y*cvs.height};
+  }
+  // pixel space — scale from video to canvas
+  return{
+    x: x * (cvs.width / (vid.videoWidth||cvs.width)),
+    y: y * (cvs.height/ (vid.videoHeight||cvs.height))
+  };
+}
+
+function drawNail(kp, ti, di, pi, isThumb){
+  const tip=getCoords(kp[ti]);
+  const dip=getCoords(kp[di]);
+  const pip=getCoords(kp[pi]);
+
+  const dx=tip.x-pip.x, dy=tip.y-pip.y;
+  const len=Math.sqrt(dx*dx+dy*dy);
+  if(len<8)return;
+
+  const ux=dx/len, uy=dy/len;
+  const perpX=-uy, perpY=ux;
+
+  const sdx=dip.x-pip.x, sdy=dip.y-pip.y;
+  const seg=Math.sqrt(sdx*sdx+sdy*sdy);
+  if(seg<4)return;
+
+  const hw=seg*(isThumb?0.72:0.60);
+  const hl=seg*0.12;
+
+  const bx=dip.x+ux*hl, by=dip.y+uy*hl;
+  const bl={x:bx-perpX*hw, y:by-perpY*hw};
+  const br={x:bx+perpX*hw, y:by+perpY*hw};
+  const s=0.80;
+  const tl={x:tip.x-perpX*hw*s, y:tip.y-perpY*hw*s};
+  const tr={x:tip.x+perpX*hw*s, y:tip.y+perpY*hw*s};
+  const ap={x:tip.x+ux*(seg*0.12), y:tip.y+uy*(seg*0.12)};
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(bl.x,bl.y);
+  ctx.lineTo(br.x,br.y);
+  ctx.quadraticCurveTo(tr.x+perpX*4,tr.y+perpY*4,ap.x,ap.y);
+  ctx.quadraticCurveTo(tl.x-perpX*4,tl.y-perpY*4,bl.x,bl.y);
+  ctx.closePath();
+  ctx.clip();
+
+  ctx.fillStyle=`rgba(${CR},${CG},${CB},${CA})`;
+  ctx.fill();
+
+  // Pearl shimmer
+  const g=ctx.createLinearGradient(tl.x,tl.y,br.x,br.y);
+  g.addColorStop(0,'rgba(255,255,255,0)');
+  g.addColorStop(0.42,'rgba(255,210,240,0)');
+  g.addColorStop(0.5,'rgba(255,240,250,0.55)');
+  g.addColorStop(0.58,'rgba(255,210,240,0)');
+  g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,cvs.width,cvs.height);
+
+  // Cuticle shadow
+  const sg=ctx.createLinearGradient(bx,by,bx+ux*seg*0.4,by+uy*seg*0.4);
+  sg.addColorStop(0,'rgba(100,0,50,0.3)');
+  sg.addColorStop(1,'rgba(100,0,50,0)');
+  ctx.fillStyle=sg;
+  ctx.fillRect(0,0,cvs.width,cvs.height);
+
+  ctx.restore();
+
+  // Outline
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(bl.x,bl.y);
+  ctx.lineTo(br.x,br.y);
+  ctx.quadraticCurveTo(tr.x+perpX*4,tr.y+perpY*4,ap.x,ap.y);
+  ctx.quadraticCurveTo(tl.x-perpX*4,tl.y-perpY*4,bl.x,bl.y);
+  ctx.closePath();
+  ctx.strokeStyle='rgba(210,30,110,0.35)';
+  ctx.lineWidth=1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+async function loop(){
+  cvs.width=window.innerWidth;
+  cvs.height=window.innerHeight;
+  ctx.clearRect(0,0,cvs.width,cvs.height);
+
+  let hands=[];
+  try{
+    if(vid.readyState>=2)
+      hands=await detector.estimateHands(vid,{flipHorizontal:mirror});
+  }catch(e){}
+
+  if(hands.length>0){
+    st.textContent='✨ Looking gorgeous!';
+    for(const h of hands){
+      const kp=h.keypoints;
+
+      // DEBUG — draw pink dots on all landmarks so we can see tracking
+      for(const p of kp){
+        const c=getCoords(p);
+        ctx.beginPath();
+        ctx.arc(c.x,c.y,5,0,Math.PI*2);
+        ctx.fillStyle='rgba(255,79,163,0.8)';
+        ctx.fill();
+      }
+
+      // Draw nails
+      for(const [ti,di,pi,isThumb] of FINGERS){
+        drawNail(kp,ti,di,pi,isThumb);
+      }
+    }
+  } else {
+    st.textContent='Show your open hand to the camera';
+  }
+
+  requestAnimationFrame(loop);
+}
+
+init();
+</script>
+</body>
+</html>
